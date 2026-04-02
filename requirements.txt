@@ -1,4 +1,7 @@
 streamlit
-dotenv
-chromadb
 openai
+openpyxl
+python-dotenv
+requests
+pandas
+chromadb

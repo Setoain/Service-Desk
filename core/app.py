@@ -8,23 +8,20 @@ load_dotenv()
 
 st.set_page_config(page_title="Service Desk", page_icon="🏢", layout="centered")
 
-# ── Session state defaults ────────────────────────────────────────────────────
 _DEFAULTS = {
     "page":             "chat",
     "messages":         [],
     "hr_submit_status": None,
     "hr_submit_debug":  None,
     "show_pto_form":    False,
-    # Access Request: {(project_id, user_id): bool}
     "access_selected":  {},
-    # Projects page: title of currently open info panel
     "expanded_project": None,
 }
 for k, v in _DEFAULTS.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
-# ── Sidebar navigation ────────────────────────────────────────────────────────
+# Sidebar
 with st.sidebar:
     st.title("Service Desk")
     st.markdown("---")
@@ -38,9 +35,7 @@ with st.sidebar:
             st.session_state.page = key
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  CHAT
-# ══════════════════════════════════════════════════════════════════════════════
+# CHAT PAGE
 if st.session_state.page == "chat":
     st.markdown(
         "<h2 style='text-align:center;margin-bottom:0.5em;'>"
@@ -63,9 +58,7 @@ if st.session_state.page == "chat":
         st.session_state.messages.append({"role": "assistant", "content": response})
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  HR OPERATIONS
-# ══════════════════════════════════════════════════════════════════════════════
+# HR OPERATIONS PAGE
 elif st.session_state.page == "hr":
     st.header("HR Operations")
 
@@ -137,13 +130,10 @@ elif st.session_state.page == "hr":
                         st.rerun()
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  ACCESS REQUEST  —  recent Wrike assignments
-# ══════════════════════════════════════════════════════════════════════════════
+# ACCESS REQUEST PAGE
 elif st.session_state.page == "access":
     st.header("🔑 Access Request")
 
-    # ── Time-window selector ──────────────────────────────────────────────────
     col_info, col_days = st.columns([4, 2])
     col_info.caption(
         "Detects people recently assigned to projects in Wrike — either as project "
@@ -159,10 +149,13 @@ elif st.session_state.page == "access":
 
     st.markdown("---")
 
-    # ── Load assignments ──────────────────────────────────────────────────────
+    @st.cache_data(ttl=120, show_spinner=False)
+    def _load_assignments(days: int):
+        return wrike.get_recent_assignments(days_back=days)
+
     with st.spinner("Scanning Wrike for recent assignments…"):
         try:
-            assignments = wrike.get_recent_assignments(days_back=days_back)
+            assignments = _load_assignments(days_back)
             load_error  = None
         except Exception as e:
             assignments = []
@@ -176,41 +169,39 @@ elif st.session_state.page == "access":
         st.info(f"✅ No new assignments found in the last {days_back} days.")
         st.stop()
 
-    # ── Render one card per project ───────────────────────────────────────────
-    # selected: {(project_id, user_id): bool}
     selected: dict[tuple, bool] = st.session_state.access_selected
 
-    for proj in assignments:
-        pid   = proj["project_id"]
-        title = proj["project_title"]
+    with st.form("access_selection_form"):
+        for proj in assignments:
+            pid   = proj["project_id"]
+            title = proj["project_title"]
 
-        # Card header
-        badge = "🆕 " if proj["is_new"] else ""
-        task_note = ""
-        if proj["task_count"] > 0:
-            task_note = f"  ·  *{proj['task_count']} task(s) assigned*"
+            badge = "🆕 " if proj["is_new"] else ""
+            task_note = ""
+            if proj["task_count"] > 0:
+                task_note = f"  ·  *{proj['task_count']} task(s) assigned*"
 
-        st.markdown(f"#### {badge}{title}{task_note}")
+            st.markdown(f"#### {badge}{title}{task_note}")
 
-        # One checkbox per person in this project
-        for person in proj["people"]:
-            uid  = person["user_id"]
-            name = person["name"]
-            key  = (pid, uid)
+            for person in proj["people"]:
+                uid  = person["user_id"]
+                name = person["name"]
+                key  = (pid, uid)
 
-            checked = st.checkbox(
-                name,
-                key=f"access_{pid}_{uid}",
-                value=selected.get(key, False),
-            )
-            selected[key] = checked
+                checked = st.checkbox(
+                    name,
+                    key=f"access_{pid}_{uid}",
+                    value=selected.get(key, False),
+                )
+                selected[key] = checked
 
-        st.session_state.access_selected = selected
-        st.markdown("---")
+            st.markdown("---")
 
-    # ── Send button ───────────────────────────────────────────────────────────
-    # Build list of (project_title, person_name) for selected checkboxes
-    to_send: list[tuple[str, str, str]] = []  # (project_id, project_title, person_name)
+        apply_selection = st.form_submit_button("Update selection")
+        if apply_selection:
+            st.session_state.access_selected = selected
+
+    to_send: list[tuple[str, str, str]] = []
     for proj in assignments:
         pid   = proj["project_id"]
         title = proj["project_title"]
@@ -226,14 +217,12 @@ elif st.session_state.page == "access":
         type="primary",
         disabled=(len(to_send) == 0),
     ):
-        # ── Group by project to show what info will be sent ───────────────────
         by_project: dict[str, list[str]] = {}
         for pid, ptitle, pname in to_send:
             by_project.setdefault(ptitle, []).append(pname)
 
         lines = []
         for ptitle, names in by_project.items():
-            # Look up what Excel info exists for this project
             try:
                 info = excel_utils.get_project_info(ptitle)
                 has_info = info is not None
@@ -247,90 +236,110 @@ elif st.session_state.page == "access":
         st.info("⚙️  Delivery logic not yet implemented — hook your method (email / Slack / Wrike comment) here.")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  PROJECTS  —  full Wrike project list + Excel info panel
-# ══════════════════════════════════════════════════════════════════════════════
+# PROJECTS PAGE
 elif st.session_state.page == "projects":
     st.header("📁 Projects")
 
+    col_refresh, _ = st.columns([2, 6])
+    if col_refresh.button("Refresh Projects", key="refresh_projects_cache"):
+        st.cache_data.clear()
+        st.rerun()
+
     @st.cache_data(ttl=300, show_spinner="Loading projects from Wrike…")
-    def _load_projects():
-        return wrike.get_all_wrike_projects()
+    def _load_projects_hierarchy():
+        return wrike.get_projects_hierarchy()
 
     try:
-        projects   = _load_projects()
+        sections   = _load_projects_hierarchy()
         load_error = None
     except Exception as e:
-        projects   = []
+        sections   = {}
         load_error = str(e)
 
     if load_error:
         st.error(f"Could not load projects from Wrike: {load_error}")
         st.stop()
 
-    if not projects:
+    if not sections:
         st.info("No projects found.")
         st.stop()
 
-    # ── Filters ───────────────────────────────────────────────────────────────
-    all_sections = sorted({p["section"] for p in projects})
-
-    col_s, col_f, col_q = st.columns([2, 2, 3])
-    selected_section = col_s.selectbox("Section", ["All sections"] + all_sections, key="proj_section_filter")
-    selected_status  = col_f.selectbox("Status",  ["All", "Active", "In Progress", "Completed"], key="proj_status_filter")
-    search_query     = col_q.text_input("Search",  placeholder="Filter by name…", key="proj_search")
-
-    filtered = projects
-    if selected_section != "All sections":
-        filtered = [p for p in filtered if p["section"] == selected_section]
-    if selected_status != "All":
-        filtered = [p for p in filtered if p["status"] == selected_status]
-    if search_query.strip():
-        q = search_query.strip().lower()
-        filtered = [p for p in filtered if q in p["title"].lower()]
-
-    st.caption(f"Showing **{len(filtered)}** of {len(projects)} projects")
+    st.caption("Wrike-style structure by section, with nested projects, epics/agents, features, and user stories.")
     st.markdown("---")
 
     STATUS_BADGE = {"Active": "🟢", "In Progress": "🟡", "Completed": "✅"}
-    current_section = None
 
-    for proj in filtered:
-        if proj["section"] != current_section:
-            current_section = proj["section"]
-            st.markdown(f"### {current_section}")
+    def _render_task_node(task_node: dict, depth: int = 0):
+        indent = "&nbsp;" * (depth * 4)
+        t_type = task_node.get("type", "Task")
+        title = task_node.get("title", "Untitled")
+        status = task_node.get("status", "Unknown")
+        assignees = ", ".join(task_node.get("assignees", [])) if task_node.get("assignees") else "Unassigned"
+        type_prefix = f"**[{t_type}]** " if t_type else ""
+        st.markdown(f"{indent}- {type_prefix}{title}  ·  {status}  ·  {assignees}", unsafe_allow_html=True)
+        for child_task in task_node.get("children", []):
+            _render_task_node(child_task, depth + 1)
 
-        badge = STATUS_BADGE.get(proj["status"], "⚪")
+    def _render_project_node(
+        node: dict,
+        depth: int = 0,
+        show_info_tab: bool = False,
+        section_name: str | None = None,
+    ):
+        badge = STATUS_BADGE.get(node.get("status"), "⚪")
+        indent = "&nbsp;" * (depth * 4)
+        node_type = node.get("node_type", "Folder")
         dates = ""
-        if proj["start_date"] != "—" or proj["end_date"] != "—":
-            dates = f"&nbsp;&nbsp;<span style='color:grey;font-size:0.82em'>{proj['start_date']} → {proj['end_date']}</span>"
+        if node.get("start_date") != "—" or node.get("end_date") != "—":
+            dates = f"<span style='color:grey;font-size:0.82em'> {node.get('start_date')} → {node.get('end_date')}</span>"
 
-        col_title, col_btn = st.columns([7, 1])
-        col_title.markdown(f"{badge} **{proj['title']}**{dates}", unsafe_allow_html=True)
-
-        is_open   = st.session_state.expanded_project == proj["title"]
-        btn_label = "▲" if is_open else "ℹ️"
-        if col_btn.button(btn_label, key=f"info_{proj['id']}"):
-            st.session_state.expanded_project = None if is_open else proj["title"]
-            st.rerun()
-
-        if st.session_state.expanded_project == proj["title"]:
-            try:
-                info      = excel_utils.get_project_info(proj["title"])
-                excel_err = None
-            except FileNotFoundError as e:
-                info, excel_err = None, str(e)
-            except Exception as e:
-                info, excel_err = None, f"Excel read error: {e}"
-
-            if excel_err:
-                st.warning(excel_err)
-            elif info is None:
-                st.info(f"No entry found for **{proj['title']}** in the Excel sheet.")
+        type_prefix = f"[{node_type}] " if node_type else ""
+        label = f"{indent}{badge} {type_prefix}{node.get('title', 'Untitled')}"
+        with st.expander(label, expanded=False):
+            if show_info_tab:
+                tab_hierarchy, tab_info = st.tabs(["Hierarchy", "Info"])
             else:
-                with st.expander(f"📋  {proj['title']} — project info", expanded=True):
-                    for field, (icon, label) in excel_utils.FRIENDLY_LABELS.items():
-                        value = info.get(field, "—")
-                        st.markdown(f"**{icon} {label}:** &nbsp; `{value}`", unsafe_allow_html=True)
+                tab_hierarchy = st.container()
+                tab_info = None
 
-        st.divider()
+            with tab_hierarchy:
+                if dates:
+                    st.markdown(dates, unsafe_allow_html=True)
+
+                owners = node.get("assignees", [])
+                if owners:
+                    st.markdown(f"**Assigned people:** {', '.join(owners)}")
+
+                tasks = node.get("tasks", [])
+                if tasks:
+                    st.markdown("**Work items**")
+                    for t in tasks:
+                        _render_task_node(t)
+
+                children = node.get("children", [])
+                if children:
+                    st.markdown("**Subprojects**")
+                    for child in children:
+                        _render_project_node(child, depth + 1, show_info_tab=False, section_name=section_name)
+
+            if tab_info is not None:
+                with tab_info:
+                    try:
+                        info = excel_utils.get_project_info(node.get("title", ""), section_name=section_name)
+                        if info is None:
+                            st.info("No entry found for this project in the Excel sheet.")
+                        else:
+                            for field, (icon, label_txt) in excel_utils.FRIENDLY_LABELS.items():
+                                value = info.get(field, "—")
+                                st.markdown(f"**{icon} {label_txt}:** {value}")
+                    except FileNotFoundError as e:
+                        st.warning(str(e))
+                    except Exception as e:
+                        st.warning(f"Excel read error: {e}")
+
+    for section_name, top_projects in sections.items():
+        with st.expander(section_name, expanded=False):
+            if not top_projects:
+                st.caption("No projects in this section.")
+            for p in top_projects:
+                _render_project_node(p, show_info_tab=True, section_name=section_name)

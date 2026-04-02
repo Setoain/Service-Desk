@@ -3,20 +3,14 @@ def flatten_vercel_project(project: dict) -> dict:
     Format the vercel information so its cleaner for the LLM to parse through it
     """
     summary = {
-        # Top-level summary fields
         "name": project.get("name", "unknown"),
         "project_id": project.get("id", ""),
         "framework": project.get("framework", "unknown"),
-        # Main production URL (from latestDeployments or targets)
         "main_url": None,
-        # All production URLs (from latestDeployments/targets/alias)
         "all_urls": [],
     }
 
-
-    # Prefer canonical .vercel.app alias if available
     canonical_url = None
-    # Check aliases in latestDeployments
     for dep in project.get("latestDeployments", []):
         for alias in dep.get("alias", []):
             if alias.endswith(".vercel.app"):
@@ -24,7 +18,6 @@ def flatten_vercel_project(project: dict) -> dict:
                 break
         if canonical_url:
             break
-    # Also check targets.production.alias
     if not canonical_url:
         prod_target = project.get("targets", {}).get("production", {})
         for alias in prod_target.get("alias", []):
@@ -35,11 +28,9 @@ def flatten_vercel_project(project: dict) -> dict:
     if canonical_url:
         summary["main_url"] = canonical_url
     else:
-        # Fallback: latestDeployments[0]['url']
         latest = project.get("latestDeployments", [])
         if latest and isinstance(latest, list) and latest[0].get("url"):
             summary["main_url"] = f"https://{latest[0]['url']}"
-        # Fallback: try targets.production.url
         elif (
             "targets" in project and
             isinstance(project["targets"], dict) and
@@ -49,7 +40,6 @@ def flatten_vercel_project(project: dict) -> dict:
         ):
             summary["main_url"] = f"https://{project['targets']['production']['url']}"
 
-    # Collect all possible URLs from aliases in latestDeployments and targets
     urls = set()
     for dep in project.get("latestDeployments", []):
         if dep.get("url"):
@@ -59,7 +49,6 @@ def flatten_vercel_project(project: dict) -> dict:
                 urls.add(f"https://{alias}")
             else:
                 urls.add(alias)
-    # Also check targets.production.alias
     prod_target = project.get("targets", {}).get("production", {})
     for alias in prod_target.get("alias", []):
         if not alias.startswith("http"):
@@ -70,7 +59,6 @@ def flatten_vercel_project(project: dict) -> dict:
     if not summary["main_url"] and summary["all_urls"]:
         summary["main_url"] = summary["all_urls"][0]
 
-    # Documented structure for LLMs
     summary["_doc"] = {
         "name": "Project name (string)",
         "project_id": "Vercel project ID (string)",
@@ -80,7 +68,6 @@ def flatten_vercel_project(project: dict) -> dict:
         "raw": "Full original Vercel API project dict for advanced lookups"
     }
 
-    # Attach the full raw dict for fallback
     summary["raw"] = project
     return summary
 
@@ -147,15 +134,3 @@ if __name__ == "__main__":
     load_dotenv()
     infos = get_all_project_infos()
     print(json.dumps(infos, indent=2))
-
-# USAGE FOR LLM CONTEXT:
-# To provide all project info as context to an LLM, run:
-#   python core/vercel.py
-# This will output a JSON array of project dicts, each with:
-#   - name: project name
-#   - project_id: Vercel project ID
-#   - framework: framework used
-#   - main_url: primary production URL
-#   - all_urls: list of all known URLs
-#   - raw: full original Vercel API dict (for advanced lookups)
-# Pass this JSON to the LLM as context for answering any project-related question.

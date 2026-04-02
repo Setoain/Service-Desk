@@ -15,7 +15,6 @@ def run_agent(prompt: str, context: str = None) -> str:
     system = "You are an internal company assistant. Use the provided context to answer user questions."
     messages = [{"role": "system", "content": system}]
     if not context:
-        # Auto-load Vercel project info as context
         vercel_projects = get_all_project_infos()
         context = json.dumps(vercel_projects, indent=2)
     messages.append({"role": "system", "content": f"Context:\n{context}"})

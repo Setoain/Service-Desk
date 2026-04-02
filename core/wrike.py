@@ -7,26 +7,24 @@ from collections import defaultdict
 
 WRIKE_API_URL = "https://app-eu.wrike.com/api/v4"
 
-# ── Hardcoded workspace IDs ───────────────────────────────────────────────────
+# workspace folder ids
 PTO_FOLDER_ID        = "MQAAAAEDvd-7"
 WRIKE_ROOT_FOLDER_ID = "IEAGL5JPI7777777"
 WRIKE_RECYCLE_BIN_ID = "IEAGL5JPI7777776"
 
-# Section folders inside Innovation Studio
+# Section folders in wrike
 INNOVATION_SECTIONS: dict[str, str] = {
-    "MQAAAABn8ADE":     "1. Innovation Funnel",
-    "IEAGL5JPI5PD3LXF": "2. Prototype Development",
-    "MQAAAAEDhSi8":     "3. Solutioning",
-    "IEAGL5JPI5QQP7U7": "4. Product Development – Customer Ready",
-    "IEAGL5JPI5PD3LSP": "5. AI Management Work",
-    "IEAGL5JPI5Q4QCUQ": "6. Training",
+    "MQAAAABn8ADE":     "Innovation Funnel",
+    "IEAGL5JPI5PD3LXF": "Prototype Development",
+    "MQAAAAEDhSi8":     "Solutioning",
+    "IEAGL5JPI5QQP7U7": "Product Development - Customer Ready!",
+    "IEAGL5JPI5PD3LSP": "AI Management Work",
+    "IEAGL5JPI5Q4QCUQ": "Training",
     "MQAAAAEDhMyW":     "Internships",
 }
 
 logger = logging.getLogger(__name__)
 
-
-# ── Auth ──────────────────────────────────────────────────────────────────────
 
 def get_headers() -> dict:
     token = os.getenv("WRIKE_ACCESS_TOKEN")
@@ -35,8 +33,7 @@ def get_headers() -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
-# ── PTO ───────────────────────────────────────────────────────────────────────
-
+# PTO process
 def submit_complete_pto(form_data: dict, file=None) -> dict:
     logger.info("Submitting PTO: full_name=%s start=%s end=%s",
                 form_data.get("full_name"), form_data.get("start_date"), form_data.get("end_date"))
@@ -96,60 +93,69 @@ def submit_complete_pto(form_data: dict, file=None) -> dict:
     return task_data
 
 
-# ── Contacts ──────────────────────────────────────────────────────────────────
-
 def get_contacts() -> dict[str, str]:
     """Return {userId: displayName} for every account contact."""
     resp = requests.get(f"{WRIKE_API_URL}/contacts", headers=get_headers())
     resp.raise_for_status()
+
+    def _display_name(contact: dict) -> str:
+        profiles = contact.get("profiles") or []
+        profile = profiles[0] if profiles else {}
+
+        for candidate in (profile.get("name"), contact.get("name")):
+            if candidate:
+                return candidate
+
+        first = profile.get("firstName") or contact.get("firstName") or ""
+        last = profile.get("lastName") or contact.get("lastName") or ""
+        full = f"{first} {last}".strip()
+        if full:
+            return full
+
+        return profile.get("email") or contact.get("email") or contact.get("id", "Unknown")
+
     result = {}
     for c in resp.json().get("data", []):
-        name = (c.get("profiles") or [{}])[0].get("name") or c.get("id", "Unknown")
+        name = _display_name(c)
         result[c["id"]] = name
     return result
 
 
-# ── Recent assignments ────────────────────────────────────────────────────────
+def get_custom_item_types_map() -> dict[str, str]:
+    """Return {customItemTypeId: title} for Wrike custom item types."""
+    try:
+        resp = requests.get(f"{WRIKE_API_URL}/custom_item_types", headers=get_headers())
+        resp.raise_for_status()
+    except Exception as e:
+        logger.warning("Could not load custom item types from Wrike: %s", e)
+        return {}
+
+    mapping: dict[str, str] = {}
+    for row in resp.json().get("data", []):
+        type_id = row.get("id")
+        title = row.get("title") or row.get("name")
+        if type_id and title:
+            mapping[type_id] = str(title)
+    return mapping
+
 
 def get_recent_assignments(days_back: int = 7) -> list[dict]:
-    """
-    Surfaces WHO has been assigned to WHICH project in the last `days_back` days.
-
-    Two signals are combined:
-
-      1. NEW PROJECTS  – folders whose project.createdDate falls within the window.
-                         Their ownerIds are the people who were assigned.
-
-      2. TASK ASSIGNEES – tasks *created* within the window that have responsibleIds.
-                          Their parentIds resolve to the containing project.
-
-    Returns a list sorted new-projects-first, then alphabetically:
-    [
-      {
-        "project_id":    str,
-        "project_title": str,
-        "is_new":        bool,
-        "task_count":    int,
-        "people": [{"user_id": str, "name": str}, ...]
-      },
-      ...
-    ]
-    """
     since_dt  = datetime.now(timezone.utc) - timedelta(days=days_back)
     since_iso = since_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
     contacts = get_contacts()
 
-    # ── Fetch full folder tree (needed for both signals) ──────────────────────
     folders_resp = requests.get(
         f"{WRIKE_API_URL}/folders/{WRIKE_ROOT_FOLDER_ID}/folders",
         headers=get_headers(),
-        params={"descendants": "true"},
+        params={
+            "descendants": "true",
+            "fields": json.dumps(["childIds", "customItemTypeId"]),
+        },
     )
     folders_resp.raise_for_status()
     all_folders: list[dict] = folders_resp.json().get("data", [])
 
-    # Build helper structures
     recycle_children: set[str] = set()
     folder_title_map: dict[str, str] = {}
     for f in all_folders:
@@ -157,8 +163,6 @@ def get_recent_assignments(days_back: int = 7) -> list[dict]:
         if f["id"] == WRIKE_RECYCLE_BIN_ID:
             recycle_children = set(f.get("childIds", []))
 
-    # projects_data accumulates entries keyed by project_id
-    # Each value: {"project_id", "project_title", "is_new", "people_ids": set, "task_count"}
     projects_data: dict[str, dict] = {}
 
     def _ensure_project(pid: str, title: str, is_new: bool = False) -> dict:
@@ -174,7 +178,6 @@ def get_recent_assignments(days_back: int = 7) -> list[dict]:
             projects_data[pid]["is_new"] = True
         return projects_data[pid]
 
-    # ── Signal 1: new projects created in the window ──────────────────────────
     for f in all_folders:
         if "project" not in f:
             continue
@@ -199,7 +202,6 @@ def get_recent_assignments(days_back: int = 7) -> list[dict]:
             entry = _ensure_project(f["id"], f["title"], is_new=True)
             entry["people_ids"].update(owner_ids)
 
-    # ── Signal 2: tasks created in the window with assignees ──────────────────
     tasks_resp = requests.get(
         f"{WRIKE_API_URL}/folders/{WRIKE_ROOT_FOLDER_ID}/tasks",
         headers=get_headers(),
@@ -227,7 +229,6 @@ def get_recent_assignments(days_back: int = 7) -> list[dict]:
             entry["people_ids"].update(responsible_ids)
             entry["task_count"] += 1
 
-    # ── Build final list ──────────────────────────────────────────────────────
     results = []
     for entry in projects_data.values():
         people = [
@@ -248,8 +249,7 @@ def get_recent_assignments(days_back: int = 7) -> list[dict]:
     return results
 
 
-# ── All projects (Projects page) ──────────────────────────────────────────────
-
+# Projects Page
 def _infer_status(proj: dict) -> str:
     if proj.get("completedDate"):
         return "Completed"
@@ -310,3 +310,246 @@ def get_all_wrike_projects() -> list[dict]:
         })
 
     return sorted(projects, key=lambda x: (x["section"], x["title"].lower()))
+
+
+def get_projects_hierarchy() -> dict[str, list[dict]]:
+    folders_resp = requests.get(
+        f"{WRIKE_API_URL}/folders/{WRIKE_ROOT_FOLDER_ID}/folders",
+        headers=get_headers(),
+        params={"descendants": "true"},
+    )
+    folders_resp.raise_for_status()
+    all_folders: list[dict] = folders_resp.json().get("data", [])
+
+    contacts = get_contacts()
+    custom_type_map = get_custom_item_types_map()
+
+    folder_map: dict[str, dict] = {f["id"]: f for f in all_folders}
+    child_ids_map: dict[str, list[str]] = {f["id"]: f.get("childIds", []) for f in all_folders}
+    parent_map: dict[str, str] = {}
+    recycle_children: set[str] = set()
+
+    for f in all_folders:
+        for child_id in f.get("childIds", []):
+            parent_map[child_id] = f["id"]
+        if f["id"] == WRIKE_RECYCLE_BIN_ID:
+            recycle_children = set(f.get("childIds", []))
+
+    section_ids = set(INNOVATION_SECTIONS.keys())
+
+    def _find_section_id_ancestor(folder_id: str) -> str | None:
+        current = folder_id
+        for _ in range(20):
+            parent = parent_map.get(current)
+            if parent is None:
+                return None
+            if parent in section_ids:
+                return parent
+            if parent in (WRIKE_ROOT_FOLDER_ID, WRIKE_RECYCLE_BIN_ID):
+                return None
+            current = parent
+        return None
+
+    node_ids: set[str] = set()
+    node_section_map: dict[str, str] = {}
+    for f in all_folders:
+        if f.get("scope") in ("RbFolder", "RbRoot", "WsRoot"):
+            continue
+        if f["id"] in recycle_children or f["id"] in (WRIKE_ROOT_FOLDER_ID, WRIKE_RECYCLE_BIN_ID):
+            continue
+        if f["id"] in section_ids:
+            section_id = f["id"]
+        else:
+            section_id = _find_section_id_ancestor(f["id"])
+        if not section_id:
+            continue
+        node_ids.add(f["id"])
+        node_section_map[f["id"]] = section_id
+
+    all_tasks: list[dict] = []
+    next_page_token = None
+    while True:
+        params = {
+            "descendants": "true",
+            "subTasks": "true",
+            "pageSize": 200,
+            "fields": json.dumps(["parentIds", "superTaskIds", "responsibleIds", "customItemTypeId"]),
+        }
+        if next_page_token:
+            params["nextPageToken"] = next_page_token
+
+        tasks_resp = requests.get(
+            f"{WRIKE_API_URL}/folders/{WRIKE_ROOT_FOLDER_ID}/tasks",
+            headers=get_headers(),
+            params=params,
+        )
+        tasks_resp.raise_for_status()
+
+        payload = tasks_resp.json()
+        all_tasks.extend(payload.get("data", []))
+        next_page_token = payload.get("nextPageToken")
+        if not next_page_token:
+            break
+
+    def _extract_item_type_id(item: dict) -> str | None:
+        if item.get("customItemTypeId"):
+            return item.get("customItemTypeId")
+        custom_item_type = item.get("customItemType")
+        if isinstance(custom_item_type, dict) and custom_item_type.get("id"):
+            return custom_item_type.get("id")
+        metadata = item.get("metadata")
+        if isinstance(metadata, dict):
+            if metadata.get("customItemTypeId"):
+                return metadata.get("customItemTypeId")
+            nested = metadata.get("customItemType")
+            if isinstance(nested, dict) and nested.get("id"):
+                return nested.get("id")
+        return None
+
+    def _infer_task_type(task: dict) -> str:
+        wrike_type_id = _extract_item_type_id(task)
+        if wrike_type_id and wrike_type_id in custom_type_map:
+            return custom_type_map[wrike_type_id]
+        return ""
+
+    def _infer_node_type(folder: dict) -> str:
+        wrike_type_id = _extract_item_type_id(folder)
+        if wrike_type_id and wrike_type_id in custom_type_map:
+            return custom_type_map[wrike_type_id]
+        return ""
+
+    task_meta: dict[str, dict] = {}
+    tasks_children: dict[str, list[str]] = defaultdict(list)
+    node_task_roots: dict[str, list[str]] = defaultdict(list)
+
+    for t in all_tasks:
+        tid = t.get("id")
+        if not tid:
+            continue
+        parent_node_ids = [pid for pid in t.get("parentIds", []) if pid in node_ids]
+
+        assignees = [contacts.get(uid, uid) for uid in t.get("responsibleIds", [])]
+        task_meta[tid] = {
+            "id": tid,
+            "title": t.get("title", "Untitled task"),
+            "status": t.get("status", "Unknown"),
+            "assignees": assignees,
+            "type": _infer_task_type(t),
+            "parent_task_ids": [sid for sid in t.get("superTaskIds", []) if sid],
+            "node_parent_ids": parent_node_ids,
+        }
+
+    anchor_cache: dict[str, set[str]] = {}
+
+    def _task_anchors(task_id: str) -> set[str]:
+        if task_id in anchor_cache:
+            return anchor_cache[task_id]
+
+        meta = task_meta.get(task_id)
+        if not meta:
+            anchor_cache[task_id] = set()
+            return anchor_cache[task_id]
+
+        anchors = set(meta.get("node_parent_ids", []))
+        for parent_tid in meta.get("parent_task_ids", []):
+            anchors.update(_task_anchors(parent_tid))
+
+        anchor_cache[task_id] = anchors
+        return anchors
+
+    included_task_ids = {tid for tid in task_meta if _task_anchors(tid)}
+
+    for tid, meta in task_meta.items():
+        if tid not in included_task_ids:
+            continue
+        linked_to_task_parent = False
+        for parent_tid in meta.get("parent_task_ids", []):
+            if parent_tid in included_task_ids:
+                tasks_children[parent_tid].append(tid)
+                linked_to_task_parent = True
+        if not linked_to_task_parent:
+            for node_id in _task_anchors(tid):
+                node_task_roots[node_id].append(tid)
+
+    def _build_task_node(task_id: str) -> dict:
+        meta = task_meta[task_id]
+        return {
+            "id": meta["id"],
+            "title": meta["title"],
+            "status": meta["status"],
+            "assignees": meta["assignees"],
+            "type": meta["type"],
+            "children": sorted([_build_task_node(cid) for cid in tasks_children.get(task_id, [])], key=lambda x: x["title"].lower()),
+        }
+
+    node_cache: dict[str, dict] = {}
+
+    def build_node(folder_id: str) -> dict:
+        if folder_id in node_cache:
+            return node_cache[folder_id]
+
+        folder = folder_map.get(folder_id, {})
+        proj = folder.get("project", {})
+        owner_names = [contacts.get(uid, uid) for uid in proj.get("ownerIds", [])] if proj else []
+        node = {
+            "id": folder_id,
+            "title": folder.get("title", folder_id),
+            "node_type": _infer_node_type(folder),
+            "status": _infer_status(proj) if proj else "Folder",
+            "start_date": proj.get("startDate", "—"),
+            "end_date": proj.get("endDate", "—"),
+            "assignees": owner_names,
+            "children": [],
+            "tasks": sorted([_build_task_node(tid) for tid in node_task_roots.get(folder_id, [])], key=lambda x: x["title"].lower()),
+        }
+
+        for child_id in child_ids_map.get(folder_id, []):
+            if child_id in node_ids:
+                node["children"].append(build_node(child_id))
+
+        node["children"].sort(key=lambda x: x["title"].lower())
+        node_cache[folder_id] = node
+        return node
+
+    grouped: dict[str, list[dict]] = defaultdict(list)
+    for nid in sorted(node_ids):
+        parent_id = parent_map.get(nid)
+        section_id = node_section_map.get(nid)
+        if not section_id:
+            continue
+        section_name = INNOVATION_SECTIONS[section_id]
+
+        if parent_id in node_ids:
+            continue
+
+        if nid == section_id:
+            section_root = build_node(nid)
+            for child in section_root.get("children", []):
+                grouped[section_name].append(child)
+
+            root_tasks = section_root.get("tasks", [])
+            if root_tasks:
+                grouped[section_name].append({
+                    "id": f"{section_id}::section-items",
+                    "title": "Section Items",
+                    "node_type": "Folder",
+                    "status": "Folder",
+                    "start_date": "—",
+                    "end_date": "—",
+                    "assignees": [],
+                    "children": [],
+                    "tasks": root_tasks,
+                })
+            continue
+
+        grouped[section_name].append(build_node(nid))
+
+    for section in grouped:
+        grouped[section].sort(key=lambda x: x["title"].lower())
+
+    ordered: dict[str, list[dict]] = {}
+    ordered_section_names = list(INNOVATION_SECTIONS.values())
+    for sec in ordered_section_names:
+        ordered[sec] = grouped.pop(sec, [])
+
+    return ordered
